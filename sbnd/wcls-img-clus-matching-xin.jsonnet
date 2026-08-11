@@ -183,7 +183,13 @@ local pr_node = clus_maker.pr(
     // Match the SBND production operating point (apc doc pr/24 sec 16): the
     // 2-step wct-pr-perevt.jsonnet sets iso_endpoint=true; mirror it here so the
     // 1-step uses the same endpoint finder for the FC/containment check.
-    iso_endpoint=true);
+    iso_endpoint=true,
+    // Stamp the coarse Q/L flash-bundle ident into perblob PCs before the PR
+    // visitor loop so NuGraph4 training-data preparation can read both coarse
+    // (matching_bundle_id) and fine (cluster_scalar["ident"]) provenance from
+    // the same TensorSetLabeler grouping.  Does not affect Bee output or
+    // production verdicts.
+    stamp_matching_bundle_id=true);
 
 // wclsTensorSetLabeler (larwirecell "WireCellAIML" plugin).  Node name kept as
 // 'clus_all_apa' so the fcl inputer "wclsTensorSetLabeler:clus_all_apa" still
