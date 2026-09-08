@@ -1,0 +1,18 @@
+# ROOT sidecar FCL: same reconstruction as wcls-img-clus-matching-xin.fcl, but
+# writes the final ART event state to larsoft_final.root via a keep-all RootOutput.
+# NOT a NuGraph H5 equivalent -- just a normal maximally-preserved ART event file.
+# Used only for the one-event ROOT sidecar engineering smoke.
+#include "wcls-img-clus-matching-xin.fcl"
+
+outputs: {
+    artRootOut: {
+        module_type:      RootOutput
+        fileName:         "larsoft_final.root"
+        compressionLevel: 1
+        dataTier:         "simulated"
+        outputCommands:   ["keep *_*_*_*"]
+    }
+}
+
+physics.stream_sidecar: [ artRootOut ]
+physics.end_paths:       [ stream_sidecar ]

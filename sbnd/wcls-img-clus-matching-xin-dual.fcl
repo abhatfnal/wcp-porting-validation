@@ -1,0 +1,106 @@
+
+#include "simulationservices_sbnd.fcl"
+#include "messages_sbnd.fcl"
+#include "detsim_drops.fcl"
+#include "opdetdigitizer_sbnd.fcl"
+
+# Dual-output mode of wcls-img-clus-matching-xin.fcl.
+#
+# Reconstruction is IDENTICAL to the standard (non-noint) variant:
+#   - mabc.zip             (BeeSink: per-APA+global clustering, truth, taggers, op)
+#   - trash-all-apa.tar.gz (TensorFileSink: labeled pctree byproduct)
+#   - nugraph.h5           (TensorSetLabeler direct file output)
+#   - tf-default.root      (ART TFileService, empty analytics)
+#
+# The ONLY addition over wcls-img-clus-matching-xin.fcl is an ART RootOutput
+# that carries input+carry-through products forward.
+#
+# Traditional WireCell ART outputer status (confirmed by investigation 2026-09-04):
+#   wclsFrameSaver: NOT configured in imaging+clustering pass (disabled / commented out).
+#   The imaging pass writes ZERO ART data products to the event store.
+#   The ART ROOT therefore contains only input/carry-through products subject to
+#   detsim_drops below.
+#
+# Use: lar --nskip 0 -n N -c wcls-img-clus-matching-xin-dual.fcl -s FILE1 -s FILE2
+
+process_name: wclssig2img
+
+services:
+{
+  TFileService: { fileName: "tf-default.root" }
+  @table::sbnd_detsim_services
+  # FileCatalogMetadata: @local::sbnd_file_catalog_mc
+  AuxDetGeometry: @local::sbnd_auxdetgeo
+  @table::sbnd_geometry_services
+}
+
+
+source: {
+   module_type: RootInput
+}
+
+physics :{
+   producers: {
+
+      sig2img : {
+         module_type : WireCellToolkit
+         wcls_main: {
+            tool_type: WCLS
+            apps: ["Pgrapher"]
+
+            logsinks: ["stdout"]
+            loglevels: ["debug"]
+
+            plugins: ["WireCellGen", "WireCellImg", "WireCellClus", "WireCellPgraph", "WireCellSio", "WireCellRoot", "WireCellLarsoft", "WireCellAux", "WireCellMatch", "WireCellAIML"]
+
+            inputers: [
+                "wclsCookedFrameSource:sigs"
+                , "wclsOpFlashSource:tpc0"
+                , "wclsOpFlashSource:tpc1"
+                , "wclsTensorSetLabeler:clus_all_apa"
+                      ]
+
+            # No outputers: imaging+clustering pass writes zero ART products.
+            # Traditional outputs (mabc.zip, nugraph.h5) are WCT-native file sinks
+            # configured inside wcls-img-clus-matching-xin.jsonnet.
+
+            configs: ["wcls-img-clus-matching-xin.jsonnet"]
+
+            params : {
+                reality: "sim"
+                img_config: "active2view+masked2view"
+                opflash0_input_label: "opflashtpc0:"
+                opflash1_input_label: "opflashtpc1:"
+            }
+            structs : {
+                recobwire_tags: "[\"simtpc2d:dnnsp\", \"simtpc2d:dnnsp\"]"
+                trace_tags: "[\"gauss\", \"wiener\"]"
+                summary_tags: "[\"\", \"simtpc2d:wienersummary\"]"
+                input_mask_tags: "[\"simtpc2d:badmasks\"]"
+                output_mask_tags: "[\"bad\"]"
+            }
+         }
+      }
+   }
+
+   p1 : [ sig2img ]
+   trigger_paths : [ p1 ]
+
+   end1 : [ out1 ]
+   end_paths : [ end1 ]
+
+}
+
+outputs: {
+   out1: {
+      module_type: RootOutput
+      fileName: "reco_wirecell_50evt.root"
+      # Keep all input/carry-through products, drop large sim truth products
+      # using the standard SBND detsim_drops sequence (defined in detsim_drops.fcl).
+      outputCommands: ["keep *_*_*_*",
+                       @sequence::detsim_drops,
+                       "drop sim::AuxDetHits_*_*_*",
+                       "drop sim::AuxDetSimChannels_*_*_*",
+                       "drop *_crtsim_*_*"]
+   }
+}
