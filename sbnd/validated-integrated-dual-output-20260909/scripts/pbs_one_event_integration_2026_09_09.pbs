@@ -1,0 +1,176 @@
+#!/bin/bash
+#PBS -N integration-1evt-20260909
+#PBS -l select=1:ncpus=16
+#PBS -l walltime=02:00:00
+#PBS -l filesystems=home:eagle:grand
+#PBS -q by-gpu
+#PBS -A neutrinoGPU::wirecell_2026
+#PBS -j oe
+#PBS -o /lus/eagle/projects/neutrinoGPU/abhat/sbnd/sample_generation_port/work/haiwang-current/integration-2026-09-08/one-event-test/logs/pbs_one_event_integration.log
+
+. /etc/profile || true
+
+BASE=/lus/eagle/projects/neutrinoGPU/abhat/sbnd/sample_generation_port/work/haiwang-current
+INTDIR=$BASE/integration-2026-09-08
+TESTDIR=$INTDIR/one-event-test
+LOGDIR=$TESTDIR/logs
+
+IMAGES=/lus/eagle/projects/neutrinoGPU/larsoft_hpc/images
+SIF=/lus/grand/projects/neutrinoGPU/software/containers/slf7.sif
+LARSOFT_SQS=$IMAGES/larsoft-v10_14_02.squashfs
+SBND_DELTA_SQS=$IMAGES/sbnd-v10_14_02_04_delta.squashfs
+
+PYEXEC=/lus/eagle/projects/neutrinoGPU/abhat/conda/envs/nugraph-a-sophia/bin/python3
+
+CONTAINER_SCRIPT=$BASE/run_one_event_integration.sh
+
+echo "=== PBS: Integration 1-event validation — 2026-09-09 ==="
+echo "Job: ${PBS_JOBID:-local}"
+date
+echo ""
+echo "BASE:     $BASE"
+echo "INTDIR:   $INTDIR"
+echo "TESTDIR:  $TESTDIR"
+echo ""
+
+mkdir -p "$LOGDIR" "$TESTDIR/run" "$TESTDIR/config" "$TESTDIR/validation"
+
+# ============================================================
+# Preflight: verify frozen integration HEADs (login node git 2.x)
+# ============================================================
+echo "=== Preflight: verify integration HEADs ==="
+
+EXPECTED_WCT="b2e3c6a9b440af9f440151d5e9c9aa1771194bd0"
+EXPECTED_LWC="5c50b2dc31a8b8f07b4afe4e1987884e2f298901"
+
+WCT_ACTUAL=$(git -C "$INTDIR/wct" rev-parse HEAD 2>/dev/null || echo "UNKNOWN")
+echo "WCT HEAD: $WCT_ACTUAL"
+echo "Expected: $EXPECTED_WCT"
+if [[ "$WCT_ACTUAL" != "$EXPECTED_WCT" ]]; then
+    echo "PREFLIGHT FAIL: WCT HEAD mismatch"
+    exit 1
+fi
+echo "WCT HEAD: OK"
+
+LWC_ACTUAL=$(git -C "$INTDIR/larwirecell" rev-parse HEAD 2>/dev/null || echo "UNKNOWN")
+echo "LWC HEAD: $LWC_ACTUAL"
+echo "Expected: $EXPECTED_LWC"
+if [[ "$LWC_ACTUAL" != "$EXPECTED_LWC" ]]; then
+    echo "PREFLIGHT FAIL: larwirecell HEAD mismatch"
+    exit 1
+fi
+echo "LWC HEAD: OK"
+
+# Verify required files
+echo ""
+echo "=== Preflight: required files ==="
+[ -f "$SIF" ] && echo "SIF: OK" || { echo "SIF MISSING: $SIF"; exit 1; }
+[ -f "$LARSOFT_SQS" ] && echo "larsoft squashfs: OK" || { echo "MISSING: $LARSOFT_SQS"; exit 1; }
+[ -f "$SBND_DELTA_SQS" ] && echo "sbnd squashfs: OK" || { echo "MISSING: $SBND_DELTA_SQS"; exit 1; }
+[ -f "$CONTAINER_SCRIPT" ] && echo "container script: OK" || { echo "MISSING: $CONTAINER_SCRIPT"; exit 1; }
+[ -f "$INTDIR/one-event-test/config/wcls-img-clus-integration-1evt.fcl" ] && \
+    echo "integration FCL: OK" || { echo "MISSING integration FCL"; exit 1; }
+[ -f "$INTDIR/one-event-test/config/wcls-img-clus-integration-1evt.jsonnet" ] && \
+    echo "integration jsonnet: OK" || { echo "MISSING integration jsonnet"; exit 1; }
+[ -f "$INTDIR/build/lwc-install/lib/libWireCellAIML.so" ] && \
+    echo "libWireCellAIML.so: OK" || { echo "MISSING: libWireCellAIML.so"; exit 1; }
+[ -f "$INTDIR/build/lwc-install/lib/libWireCellLarsoft.so" ] && \
+    echo "libWireCellLarsoft.so: OK" || { echo "MISSING: libWireCellLarsoft.so"; exit 1; }
+echo "Preflight: PASS"
+
+# ============================================================
+# Load apptainer
+# ============================================================
+echo ""
+echo "=== Loading apptainer ==="
+module use /soft/modulefiles
+module load spack-pe-base
+module load apptainer
+echo "apptainer: $(apptainer version)"
+
+chmod +x "$CONTAINER_SCRIPT"
+
+# ============================================================
+# Phase 1-9: Container reconstruction (1 event)
+# ============================================================
+echo ""
+echo "=== Running integration container (1 event) ==="
+date
+
+apptainer exec --fakeroot \
+    --bind /lus/eagle \
+    --bind /lus/grand \
+    --overlay "$LARSOFT_SQS":ro \
+    --overlay "$SBND_DELTA_SQS":ro \
+    "$SIF" \
+    bash -lc "bash $CONTAINER_SCRIPT" \
+    2>&1 | tee "$LOGDIR/container_one_event.log"
+PIPE_RC=("${PIPESTATUS[@]}")
+CONTAINER_EXIT="${PIPE_RC[0]}"
+
+echo ""
+echo "=== Key results from container log ==="
+grep -E "PASS|FAIL|exit|INTEGRATION|Phase [0-9]|WCT SHA|LWC SHA|mabc.zip|nugraph.h5|reco_wirecell" \
+    "$LOGDIR/container_one_event.log" 2>/dev/null | tail -40
+
+echo ""
+date
+echo "Container exit: $CONTAINER_EXIT"
+
+if [ "$CONTAINER_EXIT" -ne 0 ]; then
+    echo "=== INTEGRATION 1-EVENT CONTAINER: FAIL (exit=$CONTAINER_EXIT) ==="
+    echo "Check: $LOGDIR/container_one_event.log"
+    exit $CONTAINER_EXIT
+fi
+
+# ============================================================
+# Phase 10-17: Python validation (H5 structure, adapter, canonical H5)
+# ============================================================
+echo ""
+echo "=== Phase 10-17: Python validation ==="
+date
+
+VALIDATE_PY=$BASE/validate_one_event_integration.py
+if [ ! -f "$VALIDATE_PY" ]; then
+    echo "WARNING: $VALIDATE_PY not found — Python validation skipped"
+    echo "PYTHON_VALIDATION: SKIPPED"
+else
+    OPENBLAS_NUM_THREADS=1 "$PYEXEC" "$VALIDATE_PY" \
+        2>&1 | tee "$LOGDIR/validate_one_event.log"
+    PY_EXIT=$?
+    echo "Python validation exit: $PY_EXIT"
+fi
+
+# ============================================================
+# PBS summary
+# ============================================================
+echo ""
+echo "=== PBS SUMMARY ==="
+date
+echo "Job:             ${PBS_JOBID:-local}"
+echo "Container exit:  $CONTAINER_EXIT"
+echo ""
+
+echo "Output inventory:"
+RUNDIR=$TESTDIR/run
+for f in reco_wirecell_integration_1evt.root mabc.zip nugraph.h5 trash-all-apa.tar.gz tf-default.root; do
+    if [ -f "$RUNDIR/$f" ]; then
+        SZ=$(du -sh "$RUNDIR/$f" 2>/dev/null | cut -f1)
+        echo "  $f  $SZ"
+    else
+        echo "  MISSING: $f"
+    fi
+done
+
+echo ""
+if [ "$CONTAINER_EXIT" -eq 0 ]; then
+    echo "=== INTEGRATION 1-EVENT: PASS ==="
+    echo ""
+    echo "READY_FOR_48_EVENT_ENGINEERING_VALIDATION"
+else
+    echo "=== INTEGRATION 1-EVENT: FAIL ==="
+    echo ""
+    echo "NOT_READY_FOR_48_EVENT_ENGINEERING_VALIDATION: container exit $CONTAINER_EXIT"
+fi
+
+date

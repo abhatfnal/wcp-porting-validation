@@ -1,0 +1,188 @@
+#!/bin/bash
+#PBS -N integration-48evt-20260909
+#PBS -l select=1:ncpus=16
+#PBS -l walltime=02:00:00
+#PBS -l filesystems=home:eagle:grand
+#PBS -q by-gpu
+#PBS -A neutrinoGPU::wirecell_2026
+#PBS -j oe
+#PBS -o /lus/eagle/projects/neutrinoGPU/abhat/sbnd/sample_generation_port/work/haiwang-current/integration-2026-09-08/engineering-48evt/logs/pbs_48evt_integration.log
+
+. /etc/profile || true
+
+BASE=/lus/eagle/projects/neutrinoGPU/abhat/sbnd/sample_generation_port/work/haiwang-current
+INTDIR=$BASE/integration-2026-09-08
+TESTDIR=$INTDIR/engineering-48evt
+LOGDIR=$TESTDIR/logs
+
+IMAGES=/lus/eagle/projects/neutrinoGPU/larsoft_hpc/images
+SIF=/lus/grand/projects/neutrinoGPU/software/containers/slf7.sif
+LARSOFT_SQS=$IMAGES/larsoft-v10_14_02.squashfs
+SBND_DELTA_SQS=$IMAGES/sbnd-v10_14_02_04_delta.squashfs
+
+PYEXEC=/lus/eagle/projects/neutrinoGPU/abhat/conda/envs/nugraph-a-sophia/bin/python3
+
+CONTAINER_SCRIPT=$BASE/run_48evt_integration.sh
+VALIDATE_PY=$BASE/validate_48evt_integration.py
+
+echo "=== PBS: Integration 48-event engineering validation — 2026-09-09 ==="
+echo "Job: ${PBS_JOBID:-local}"
+date
+echo ""
+echo "BASE:     $BASE"
+echo "INTDIR:   $INTDIR"
+echo "TESTDIR:  $TESTDIR"
+echo ""
+
+mkdir -p "$LOGDIR" "$TESTDIR/run" "$TESTDIR/config" "$TESTDIR/validation" "$TESTDIR/canonical"
+
+# ============================================================
+# Preflight: verify frozen integration HEADs and config SHAs
+# ============================================================
+echo "=== Preflight: verify integration HEADs ==="
+
+EXPECTED_WCT="b2e3c6a9b440af9f440151d5e9c9aa1771194bd0"
+EXPECTED_LWC="5c50b2dc31a8b8f07b4afe4e1987884e2f298901"
+EXPECTED_FCL_SHA="2859f5c9c5950bc1cec726fbbe4b9a5e5a3ec521f9cf2ae32cff9fdf5a12c0fe"
+EXPECTED_JSON_SHA="617e556126550b435a092d26ee3d6da35799ce73bafb4bde66e850b547291dd4"
+
+WCT_ACTUAL=$(git -C "$INTDIR/wct" rev-parse HEAD 2>/dev/null || echo "UNKNOWN")
+echo "WCT HEAD: $WCT_ACTUAL (expected $EXPECTED_WCT)"
+if [[ "$WCT_ACTUAL" != "$EXPECTED_WCT" ]]; then
+    echo "PREFLIGHT FAIL: WCT HEAD mismatch"
+    exit 1
+fi
+echo "WCT HEAD: OK"
+
+LWC_ACTUAL=$(git -C "$INTDIR/larwirecell" rev-parse HEAD 2>/dev/null || echo "UNKNOWN")
+echo "LWC HEAD: $LWC_ACTUAL (expected $EXPECTED_LWC)"
+if [[ "$LWC_ACTUAL" != "$EXPECTED_LWC" ]]; then
+    echo "PREFLIGHT FAIL: larwirecell HEAD mismatch"
+    exit 1
+fi
+echo "LWC HEAD: OK"
+
+# Config SHA256
+FCL_ACTUAL=$(sha256sum "$TESTDIR/config/wcls-img-clus-integration-1evt.fcl" 2>/dev/null | awk '{print $1}')
+JSON_ACTUAL=$(sha256sum "$TESTDIR/config/wcls-img-clus-integration-1evt.jsonnet" 2>/dev/null | awk '{print $1}')
+echo "FCL SHA256: $FCL_ACTUAL (expected $EXPECTED_FCL_SHA)"
+echo "JSON SHA256: $JSON_ACTUAL (expected $EXPECTED_JSON_SHA)"
+if [[ "$FCL_ACTUAL" != "$EXPECTED_FCL_SHA" ]]; then
+    echo "PREFLIGHT FAIL: FCL SHA256 mismatch"
+    exit 1
+fi
+if [[ "$JSON_ACTUAL" != "$EXPECTED_JSON_SHA" ]]; then
+    echo "PREFLIGHT FAIL: jsonnet SHA256 mismatch"
+    exit 1
+fi
+echo "Config SHAs: OK (frozen config confirmed)"
+
+echo ""
+echo "=== Preflight: required files ==="
+[ -f "$SIF" ]              && echo "SIF: OK"             || { echo "SIF MISSING: $SIF"; exit 1; }
+[ -f "$LARSOFT_SQS" ]     && echo "larsoft sqfs: OK"    || { echo "MISSING: $LARSOFT_SQS"; exit 1; }
+[ -f "$SBND_DELTA_SQS" ]  && echo "sbnd sqfs: OK"       || { echo "MISSING: $SBND_DELTA_SQS"; exit 1; }
+[ -f "$CONTAINER_SCRIPT" ] && echo "container script: OK" || { echo "MISSING: $CONTAINER_SCRIPT"; exit 1; }
+[ -f "$VALIDATE_PY" ]     && echo "validate.py: OK"     || { echo "MISSING: $VALIDATE_PY"; exit 1; }
+[ -f "$INTDIR/build/lwc-install/lib/libWireCellAIML.so" ] && \
+    echo "libWireCellAIML.so: OK" || { echo "MISSING: libWireCellAIML.so"; exit 1; }
+[ -f "$INTDIR/build/lwc-install/lib/libWireCellLarsoft.so" ] && \
+    echo "libWireCellLarsoft.so: OK" || { echo "MISSING: libWireCellLarsoft.so"; exit 1; }
+echo "Preflight: PASS"
+
+# ============================================================
+# Load apptainer
+# ============================================================
+echo ""
+echo "=== Loading apptainer ==="
+module use /soft/modulefiles
+module load spack-pe-base
+module load apptainer
+echo "apptainer: $(apptainer version)"
+
+chmod +x "$CONTAINER_SCRIPT"
+
+# ============================================================
+# Phase 1-15 (container): Run 48 events
+# ============================================================
+echo ""
+echo "=== Running integration container (48 events) ==="
+date
+
+apptainer exec --fakeroot \
+    --bind /lus/eagle \
+    --bind /lus/grand \
+    --overlay "$LARSOFT_SQS":ro \
+    --overlay "$SBND_DELTA_SQS":ro \
+    "$SIF" \
+    bash -lc "bash $CONTAINER_SCRIPT" \
+    2>&1 | tee "$LOGDIR/container_48evt.log"
+PIPE_RC=("${PIPESTATUS[@]}")
+CONTAINER_EXIT="${PIPE_RC[0]}"
+
+echo ""
+echo "=== Key results from container log ==="
+grep -E "PASS|FAIL|exit|INTEGRATION|Phase [0-9]|WCT SHA|LWC SHA|mabc.zip|nugraph.h5|48 event|walltime|peak RSS" \
+    "$LOGDIR/container_48evt.log" 2>/dev/null | tail -50
+
+echo ""
+date
+echo "Container exit: $CONTAINER_EXIT"
+
+if [ "$CONTAINER_EXIT" -ne 0 ]; then
+    echo "=== INTEGRATION 48-EVENT CONTAINER: FAIL (exit=$CONTAINER_EXIT) ==="
+    echo "Check: $LOGDIR/container_48evt.log"
+    exit $CONTAINER_EXIT
+fi
+
+# ============================================================
+# Python validation (outside container, nugraph-a-sophia env)
+# ============================================================
+echo ""
+echo "=== Python validation (48-event) ==="
+date
+
+OPENBLAS_NUM_THREADS=1 "$PYEXEC" "$VALIDATE_PY" \
+    2>&1 | tee "$LOGDIR/validate_48evt.log"
+PIPE_PY=("${PIPESTATUS[@]}")
+PY_EXIT="${PIPE_PY[0]}"
+echo "Python validation exit: $PY_EXIT"
+
+# ============================================================
+# PBS summary
+# ============================================================
+echo ""
+echo "=== PBS SUMMARY ==="
+date
+echo "Job:             ${PBS_JOBID:-local}"
+echo "Container exit:  $CONTAINER_EXIT"
+echo "Python exit:     $PY_EXIT"
+echo ""
+
+echo "Output inventory:"
+RUNDIR=$TESTDIR/run
+for f in reco_wirecell_integration_1evt.root mabc.zip mabc-pr.zip nugraph.h5 trash-all-apa.tar.gz tf-default.root; do
+    if [ -f "$RUNDIR/$f" ]; then
+        SZ=$(du -sh "$RUNDIR/$f" 2>/dev/null | cut -f1)
+        echo "  $f  $SZ"
+    else
+        echo "  MISSING: $f"
+    fi
+done
+
+echo ""
+if [ "$CONTAINER_EXIT" -eq 0 ] && [ "$PY_EXIT" -eq 0 ]; then
+    echo "=== INTEGRATION 48-EVENT: PASS ==="
+    echo ""
+    echo "READY_TO_FREEZE_INTEGRATED_DUAL_OUTPUT_RELEASE"
+elif [ "$CONTAINER_EXIT" -ne 0 ]; then
+    echo "=== INTEGRATION 48-EVENT: FAIL (container exit $CONTAINER_EXIT) ==="
+    echo ""
+    echo "NOT_READY_TO_FREEZE_INTEGRATED_DUAL_OUTPUT_RELEASE: container exit $CONTAINER_EXIT"
+else
+    echo "=== INTEGRATION 48-EVENT: FAIL (python exit $PY_EXIT) ==="
+    echo ""
+    echo "NOT_READY_TO_FREEZE_INTEGRATED_DUAL_OUTPUT_RELEASE: python validation exit $PY_EXIT"
+fi
+
+date
